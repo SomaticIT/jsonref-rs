@@ -66,6 +66,14 @@ pub enum Error {
         url: String,
         source: serde_json::Error,
     },
+    #[cfg(feature = "yaml")]
+    #[snafu(display("schema from {} not valid YAML: {}", url, source))]
+    SchemaNotYamlSerde {
+        url: String,
+        source: serde_saphyr::Error,
+    },
+    #[snafu(display("schema format not supported for {}", url))]
+    SchemaFormatNotSupported { url: String },
     #[snafu(display("json pointer {} not found", pointer))]
     JsonPointerNotFound { pointer: String },
     #[snafu(display("{}", "Json Ref Error"))]
@@ -211,13 +219,10 @@ impl JsonRef {
     /// # assert_eq!(file_example, file_expected)
     /// ```
     pub fn deref_file(&mut self, file_path: &str) -> Result<Value> {
-        let file = fs::File::open(file_path).context(SchemaFromFile {
-            filename: file_path.to_owned(),
-        })?;
-        let mut value: Value = serde_json::from_reader(file).context(SchemaNotJsonSerde {
-            url: file_path.to_owned(),
-        })?;
         let path = PathBuf::from(file_path);
+
+        let mut value: Value = Self::parse_file(&path)?;
+
         let absolute_path = fs::canonicalize(path).context(JSONRefError {})?;
         let url = format!("file://{}", absolute_path.to_string_lossy());
 
@@ -262,14 +267,11 @@ impl JsonRef {
                                         url: ref_no_fragment.clone(),
                                     })?
                             } else if ref_no_fragment.starts_with("file") {
-                                let file = fs::File::open(ref_url_no_fragment.path()).context(
-                                    SchemaFromFile {
-                                        filename: ref_no_fragment.clone(),
-                                    },
-                                )?;
-                                serde_json::from_reader(file).context(SchemaNotJsonSerde {
-                                    url: ref_no_fragment.clone(),
-                                })?
+                                if let Ok(file_path) = ref_url_no_fragment.to_file_path() {
+                                    Self::parse_file(&file_path)?
+                                } else {
+                                    panic!("need url to be a file or a http based url")
+                                }
                             } else {
                                 panic!("need url to be a file or a http based url")
                             }
@@ -312,6 +314,37 @@ impl JsonRef {
             }
         }
         Ok(())
+    }
+
+    fn parse_file(path: &PathBuf) -> Result<Value> {
+        match path.extension().and_then(|s| s.to_str()) {
+            Some("json") | Some("JSON") => {
+                let file = fs::File::open(&path).context(SchemaFromFile {
+                    filename: path.to_string_lossy(),
+                })?;
+
+                Ok(
+                    serde_json::from_reader(file).with_context(|| SchemaNotJsonSerde {
+                        url: format!("file://{}", path.to_string_lossy()),
+                    })?,
+                )
+            }
+            #[cfg(feature = "yaml")]
+            Some("yaml") | Some("yml") | Some("YAML") | Some("YML") => {
+                let file = fs::File::open(&path).context(SchemaFromFile {
+                    filename: path.to_string_lossy(),
+                })?;
+
+                Ok(
+                    serde_saphyr::from_reader(file).with_context(|| SchemaNotYamlSerde {
+                        url: format!("file://{}", path.to_string_lossy()),
+                    })?,
+                )
+            }
+            _ => Err(Error::SchemaFormatNotSupported {
+                url: format!("file://{}", path.to_string_lossy()),
+            }),
+        }
     }
 }
 
